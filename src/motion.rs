@@ -71,9 +71,9 @@ enum SideFinStrokes {
     },
 }
 
-/// One slow lap in eight seconds: two strokes, fifteen waves, and six sculls.
+/// One slow lap in sixteen seconds (adaptive pond: doubled for the wide pond): two strokes, fifteen waves, and six sculls.
 const CRUISE_STYLE: LapStyle = LapStyle {
-    loop_frame_count: 120,
+    loop_frame_count: 240,
     lap_count: 1.0,
     stroke_frame_count: 60.0,
     stroke_share: 0.55,
@@ -95,9 +95,9 @@ const CRUISE_STYLE: LapStyle = LapStyle {
     scull_phase_radians: 1.1,
 };
 
-/// Two fast laps in eight seconds: four bursts, twenty waves, and eight sculls.
+/// Two fast laps in sixteen seconds (adaptive pond: doubled for the wide pond): four bursts, twenty waves, and eight sculls.
 const DART_STYLE: LapStyle = LapStyle {
-    loop_frame_count: 120,
+    loop_frame_count: 240,
     lap_count: 2.0,
     stroke_frame_count: 30.0,
     stroke_share: 0.35,
@@ -119,9 +119,9 @@ const DART_STYLE: LapStyle = LapStyle {
     scull_phase_radians: 0.0,
 };
 
-/// Adaptive pond: two steady laps in eight seconds, cruising strokes at a quicker beat.
+/// Adaptive pond: two steady laps in sixteen seconds, cruising strokes at a quicker beat.
 const BRISK_STYLE: LapStyle = LapStyle {
-    loop_frame_count: 120,
+    loop_frame_count: 240,
     lap_count: 2.0,
     stroke_frame_count: 40.0,
     stroke_share: 0.45,

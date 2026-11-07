@@ -27,9 +27,10 @@ use crate::koi::{
 use crate::motion::{Course, STILL_POSE, SwimPose, calculate_swim_pose, frame_count};
 
 /// Width of the native canvas every koi is drawn on, at every growth level.
-pub const FRAME_WIDTH_PIXELS: u32 = 256;
-/// Height of the native canvas; the canvas is square.
-pub const FRAME_HEIGHT_PIXELS: u32 = FRAME_WIDTH_PIXELS;
+/// Adaptive pond: a wide pond that fills a profile README's width.
+pub const FRAME_WIDTH_PIXELS: u32 = 832;
+/// Height of the native canvas.
+pub const FRAME_HEIGHT_PIXELS: u32 = 320;
 
 /// A renderer-owned, fixed-size frame with row-major RGBA pixels.
 #[derive(Debug, Eq, PartialEq)]
@@ -58,7 +59,8 @@ impl KoiFrame {
 /// observation date. Identical inputs produce identical pixels without I/O, clock
 /// reads, or input mutation.
 pub fn render_koi(koi_development: &KoiDevelopment, koi_body: KoiBody) -> KoiFrame {
-    let koi_anatomy = calculate_anatomy(koi_development.daily_size_contributions());
+    let mut koi_anatomy = calculate_anatomy(koi_development.daily_size_contributions());
+    koi_anatomy.course_seed = calculate_course_seed(koi_development);
     render_pose(
         koi_development,
         koi_body,
@@ -82,7 +84,8 @@ pub fn render_swim_frame(
     behavior: Behavior,
     frame_index: u32,
 ) -> KoiFrame {
-    let koi_anatomy = calculate_anatomy(koi_development.daily_size_contributions());
+    let mut koi_anatomy = calculate_anatomy(koi_development.daily_size_contributions());
+    koi_anatomy.course_seed = calculate_course_seed(koi_development);
     render_pond_koi(
         koi_development,
         koi_body,
@@ -106,7 +109,8 @@ pub fn render_pond_frame(
 ) -> KoiFrame {
     const STREAK_KOI_SCALE: f64 = 0.8;
     const STREAK_KOI_FRAME_LAG: u32 = 7;
-    const HOVER_RING_PIXELS: f64 = 62.0;
+    // Resting streak koi spread across the wide pond on an ellipse.
+    const HOVER_RING_PIXELS: [f64; 2] = [230.0, 80.0];
     // Seeds spread by a large odd constant so neighbouring koi get unrelated patterns.
     const SEED_STEP: u64 = 0x9E37_79B9_7F4A_7C15;
     let koi_count = koi_development.koi_count();
@@ -122,12 +126,14 @@ pub fn render_pond_frame(
             pond_development.identity_seed = koi_development
                 .identity_seed
                 .wrapping_add(SEED_STEP.wrapping_mul(u64::from(koi_index)));
-            let ring_angle = TAU * f64::from(koi_index - 1) / f64::from(koi_count - 1) - PI / 2.0;
+            let ring_angle = TAU * f64::from(koi_index - 1) / f64::from(koi_count - 1);
             hover_offset = [
-                HOVER_RING_PIXELS * ring_angle.cos(),
-                HOVER_RING_PIXELS * ring_angle.sin(),
+                HOVER_RING_PIXELS[0] * ring_angle.cos(),
+                HOVER_RING_PIXELS[1] * ring_angle.sin(),
             ];
         }
+        // Every koi wanders its own route, and the routes change each day.
+        koi_anatomy.course_seed = calculate_course_seed(&pond_development);
         let lap_offset = TAU * f64::from(koi_index) / f64::from(koi_count);
         let koi_frame = render_pond_koi(
             &pond_development,
@@ -576,6 +582,8 @@ const DITHER_RANKS: [[u8; 4]; 4] = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9]
 
 #[derive(Clone)]
 struct KoiAnatomy {
+    /// Adaptive pond: seeds this koi's wandering course; set per koi and per day.
+    course_seed: u64,
     body_length_pixels: f64,
     body_width_pixels: f64,
     /// Share of the body length over which the head widens from the nose.
@@ -761,6 +769,7 @@ fn calculate_anatomy(total_contributions: u64) -> KoiAnatomy {
         adult_shape_fraction,
     ) + MATURE_BODY_WIDTH_GAIN * mature_growth_fraction;
     KoiAnatomy {
+        course_seed: 0,
         body_length_pixels,
         body_width_pixels: body_length_pixels * body_width_fraction,
         head_slant_fraction: interpolate(
@@ -848,10 +857,10 @@ fn build_spine(koi_anatomy: &KoiAnatomy, swim_pose: &SwimPose) -> Vec<CurvePoint
             }
             center_points
         }
-        // Adaptive pond: the lap is a rounded square that reaches out to the whole box.
-        // Each body point sits one pixel of course behind the one in front.
+        // Adaptive pond: the lap is a smooth, random wandering loop stretched across the
+        // whole pond. Each body point sits one pixel of course behind the one in front.
         Course::Lap { angle_radians } => {
-            let pond_course = PondCourse::new(calculate_pond_reach(koi_anatomy));
+            let pond_course = PondCourse::new(koi_anatomy);
             let head_distance = (angle_radians / TAU).rem_euclid(1.0) * pond_course.length;
             (0..point_count)
                 .map(|point_index| CurvePoint {
@@ -1046,19 +1055,27 @@ fn calculate_whisker_length(koi_anatomy: &KoiAnatomy) -> u32 {
         .clamp(3.0, 5.0) as u32
 }
 
-/// Adaptive pond: how far the rounded-square course reaches from the frame center,
-/// leaving room for the body, its fins and the outline at the frame's edge.
-fn calculate_pond_reach(koi_anatomy: &KoiAnatomy) -> f64 {
-    const FRAME_REACH_PIXELS: f64 = 124.0;
-    const SIDE_ROOM_PER_BODY_WIDTH: f64 = 1.6;
-    const MIN_REACH_PIXELS: f64 = 60.0;
-    (FRAME_REACH_PIXELS - SIDE_ROOM_PER_BODY_WIDTH * koi_anatomy.body_width_pixels)
-        .max(MIN_REACH_PIXELS)
+/// Adaptive pond: one seed per koi per day, so each koi's route changes every day.
+fn calculate_course_seed(koi_development: &KoiDevelopment) -> u64 {
+    let day_number =
+        u64::from(chrono::Datelike::num_days_from_ce(&koi_development.observed_on).unsigned_abs());
+    koi_development.identity_seed ^ day_number.wrapping_mul(0xD1B5_4A32_D192_ED03)
 }
 
-/// Adaptive pond: a closed, clockwise superellipse course measured by distance along it.
-/// It starts at the right-hand side, so a quarter turn short of a full lap is the top,
-/// matching the original circle's angles.
+/// A small, deterministic random number generator (SplitMix64).
+fn next_random(state: &mut u64) -> f64 {
+    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut mixed = *state;
+    mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    mixed ^= mixed >> 31;
+    (mixed >> 11) as f64 / (1u64 << 53) as f64
+}
+
+/// Adaptive pond: a closed course measured by distance along it. The route is a sum
+/// of three random harmonics, so it wanders, loops and crosses itself smoothly, then
+/// is stretched to reach every side of the pond while leaving room for the body,
+/// fins and outline at the edge.
 struct PondCourse {
     points: Vec<[f64; 2]>,
     /// Distance along the course to each point; the last entry closes the loop.
@@ -1067,18 +1084,57 @@ struct PondCourse {
 }
 
 impl PondCourse {
-    fn new(reach_pixels: f64) -> Self {
-        const SAMPLE_COUNT: usize = 2048;
-        // 2 / exponent: an exponent of 4 gives a square with well-rounded corners.
-        const SHAPE_POWER: f64 = 0.5;
-        let points: Vec<[f64; 2]> = (0..SAMPLE_COUNT)
+    fn new(koi_anatomy: &KoiAnatomy) -> Self {
+        const SAMPLE_COUNT: usize = 4096;
+        const HARMONIC_COUNT: usize = 3;
+        const EDGE_ROOM_PER_BODY_WIDTH: f64 = 1.6;
+        const EDGE_ROOM_PIXELS: f64 = 6.0;
+        let mut random_state = koi_anatomy.course_seed;
+        let mut harmonics = [[0.0f64; 4]; HARMONIC_COUNT];
+        for (harmonic_index, harmonic) in harmonics.iter_mut().enumerate() {
+            let falloff = 1.0 / (harmonic_index + 1) as f64;
+            *harmonic = [
+                falloff * (0.45 + 0.55 * next_random(&mut random_state)),
+                TAU * next_random(&mut random_state),
+                falloff * (0.45 + 0.55 * next_random(&mut random_state)),
+                TAU * next_random(&mut random_state),
+            ];
+        }
+        let raw_points: Vec<[f64; 2]> = (0..SAMPLE_COUNT)
             .map(|sample_index| {
                 let parameter = TAU * sample_index as f64 / SAMPLE_COUNT as f64;
-                let (sine, cosine) = parameter.sin_cos();
-                [
-                    reach_pixels * cosine.signum() * cosine.abs().powf(SHAPE_POWER),
-                    reach_pixels * sine.signum() * sine.abs().powf(SHAPE_POWER),
-                ]
+                harmonics.iter().enumerate().fold(
+                    [0.0, 0.0],
+                    |[sum_x, sum_y], (harmonic_index, harmonic)| {
+                        let frequency = (harmonic_index + 1) as f64;
+                        [
+                            sum_x + harmonic[0] * (frequency * parameter + harmonic[1]).cos(),
+                            sum_y + harmonic[2] * (frequency * parameter + harmonic[3]).sin(),
+                        ]
+                    },
+                )
+            })
+            .collect();
+        let edge_room = EDGE_ROOM_PER_BODY_WIDTH * koi_anatomy.body_width_pixels + EDGE_ROOM_PIXELS;
+        let reach = [
+            f64::from(FRAME_WIDTH_PIXELS) / 2.0 - edge_room,
+            f64::from(FRAME_HEIGHT_PIXELS) / 2.0 - edge_room,
+        ];
+        let mut low = [f64::INFINITY; 2];
+        let mut high = [f64::NEG_INFINITY; 2];
+        for point in &raw_points {
+            for axis_index in 0..2 {
+                low[axis_index] = low[axis_index].min(point[axis_index]);
+                high[axis_index] = high[axis_index].max(point[axis_index]);
+            }
+        }
+        let points: Vec<[f64; 2]> = raw_points
+            .iter()
+            .map(|point| {
+                [0, 1].map(|axis_index| {
+                    let span = (high[axis_index] - low[axis_index]).max(f64::EPSILON);
+                    ((point[axis_index] - low[axis_index]) / span * 2.0 - 1.0) * reach[axis_index]
+                })
             })
             .collect();
         let mut distances = Vec::with_capacity(SAMPLE_COUNT + 1);
