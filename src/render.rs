@@ -58,7 +58,7 @@ impl KoiFrame {
 /// observation date. Identical inputs produce identical pixels without I/O, clock
 /// reads, or input mutation.
 pub fn render_koi(koi_development: &KoiDevelopment, koi_body: KoiBody) -> KoiFrame {
-    let koi_anatomy = calculate_anatomy(koi_development.total_contributions);
+    let koi_anatomy = calculate_anatomy(koi_development.daily_size_contributions());
     render_pose(
         koi_development,
         koi_body,
@@ -82,22 +82,105 @@ pub fn render_swim_frame(
     behavior: Behavior,
     frame_index: u32,
 ) -> KoiFrame {
-    let koi_anatomy = calculate_anatomy(koi_development.total_contributions);
-    let swim_pose = calculate_swim_pose(behavior, frame_index);
+    let koi_anatomy = calculate_anatomy(koi_development.daily_size_contributions());
+    render_pond_koi(
+        koi_development,
+        koi_body,
+        &koi_anatomy,
+        behavior,
+        frame_index,
+        0.0,
+        [0.0, 0.0],
+    )
+}
+
+/// Adaptive pond: render every koi in one frame. The first koi is today's size; each
+/// streak koi is a little smaller, wears its own pattern, and swims the same course a
+/// share of the lap apart (or hovers at its own spot around the pond), slightly out of
+/// step so they never move in lockstep. Later koi are painted under earlier ones.
+pub fn render_pond_frame(
+    koi_development: &KoiDevelopment,
+    koi_body: KoiBody,
+    behavior: Behavior,
+    frame_index: u32,
+) -> KoiFrame {
+    const STREAK_KOI_SCALE: f64 = 0.8;
+    const STREAK_KOI_FRAME_LAG: u32 = 7;
+    const HOVER_RING_PIXELS: f64 = 62.0;
+    // Seeds spread by a large odd constant so neighbouring koi get unrelated patterns.
+    const SEED_STEP: u64 = 0x9E37_79B9_7F4A_7C15;
+    let koi_count = koi_development.koi_count();
+    let base_anatomy = calculate_anatomy(koi_development.daily_size_contributions());
+    let mut pond_pixels = vec![[0u8; 4]; (FRAME_WIDTH_PIXELS * FRAME_HEIGHT_PIXELS) as usize];
+    for koi_index in (0..koi_count).rev() {
+        let mut koi_anatomy = base_anatomy.clone();
+        let mut pond_development = koi_development.clone();
+        let mut hover_offset = [0.0, 0.0];
+        if koi_index > 0 {
+            koi_anatomy.body_length_pixels *= STREAK_KOI_SCALE;
+            koi_anatomy.body_width_pixels *= STREAK_KOI_SCALE;
+            pond_development.identity_seed = koi_development
+                .identity_seed
+                .wrapping_add(SEED_STEP.wrapping_mul(u64::from(koi_index)));
+            let ring_angle = TAU * f64::from(koi_index - 1) / f64::from(koi_count - 1) - PI / 2.0;
+            hover_offset = [
+                HOVER_RING_PIXELS * ring_angle.cos(),
+                HOVER_RING_PIXELS * ring_angle.sin(),
+            ];
+        }
+        let lap_offset = TAU * f64::from(koi_index) / f64::from(koi_count);
+        let koi_frame = render_pond_koi(
+            &pond_development,
+            koi_body,
+            &koi_anatomy,
+            behavior,
+            frame_index + STREAK_KOI_FRAME_LAG * koi_index,
+            lap_offset,
+            hover_offset,
+        );
+        for (pond_pixel, koi_pixel) in pond_pixels.iter_mut().zip(koi_frame.rgba_pixels) {
+            if koi_pixel[3] != 0 {
+                *pond_pixel = koi_pixel;
+            }
+        }
+    }
+    KoiFrame {
+        rgba_pixels: pond_pixels,
+    }
+}
+
+/// One koi of the pond: lapping koi are moved along the course by the lap offset, and
+/// hovering koi are moved by the hover offset in native pixels.
+fn render_pond_koi(
+    koi_development: &KoiDevelopment,
+    koi_body: KoiBody,
+    koi_anatomy: &KoiAnatomy,
+    behavior: Behavior,
+    frame_index: u32,
+    lap_offset_radians: f64,
+    hover_offset: [f64; 2],
+) -> KoiFrame {
+    let mut swim_pose = calculate_swim_pose(behavior, frame_index);
     let pose_center = match swim_pose.course {
-        Course::Lap { .. } => [0.0, 0.0],
+        Course::Lap { angle_radians } => {
+            swim_pose.course = Course::Lap {
+                angle_radians: angle_radians + lap_offset_radians,
+            };
+            [0.0, 0.0]
+        }
         Course::Hover { drift_pixels, .. } => {
-            let hover_fit = fit_hover_loop(behavior, &koi_anatomy);
+            let hover_fit = fit_hover_loop(behavior, koi_anatomy);
             [0, 1].map(|axis_index| {
                 hover_fit.sweep_center[axis_index]
                     - hover_fit.drift_scales[axis_index] * drift_pixels[axis_index]
+                    - hover_offset[axis_index]
             })
         }
     };
     render_pose(
         koi_development,
         koi_body,
-        &koi_anatomy,
+        koi_anatomy,
         &swim_pose,
         Framing::At(pose_center),
     )
@@ -491,6 +574,7 @@ fn paint_depth(rgba_pixels: &mut [[u8; 4]], fish_pixel_mask: &[bool], depth: f64
 const OUTLINE_COLOR: [u8; 4] = [24, 20, 37, 255];
 const DITHER_RANKS: [[u8; 4]; 4] = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
 
+#[derive(Clone)]
 struct KoiAnatomy {
     body_length_pixels: f64,
     body_width_pixels: f64,
@@ -764,19 +848,15 @@ fn build_spine(koi_anatomy: &KoiAnatomy, swim_pose: &SwimPose) -> Vec<CurvePoint
             }
             center_points
         }
-        // Each body point sits one pixel of arc behind the one in front.
+        // Adaptive pond: the lap is a rounded square that reaches out to the whole box.
+        // Each body point sits one pixel of course behind the one in front.
         Course::Lap { angle_radians } => {
-            let radius_pixels = calculate_lap_radius(body_length_pixels);
+            let pond_course = PondCourse::new(calculate_pond_reach(koi_anatomy));
+            let head_distance = (angle_radians / TAU).rem_euclid(1.0) * pond_course.length;
             (0..point_count)
-                .map(|point_index| {
-                    let point_angle_radians = angle_radians - point_index as f64 / radius_pixels;
-                    CurvePoint {
-                        position: [
-                            radius_pixels * point_angle_radians.cos(),
-                            radius_pixels * point_angle_radians.sin(),
-                        ],
-                        half_width_pixels: calculate_point_half_width(point_index),
-                    }
+                .map(|point_index| CurvePoint {
+                    position: pond_course.position_at(head_distance - point_index as f64),
+                    half_width_pixels: calculate_point_half_width(point_index),
                 })
                 .collect()
         }
@@ -966,9 +1046,80 @@ fn calculate_whisker_length(koi_anatomy: &KoiAnatomy) -> u32 {
         .clamp(3.0, 5.0) as u32
 }
 
-/// The lap circle's radius: as wide as the frame allows, tighter for longer koi so the
+/// Adaptive pond: how far the rounded-square course reaches from the frame center,
+/// leaving room for the body, its fins and the outline at the frame's edge.
+fn calculate_pond_reach(koi_anatomy: &KoiAnatomy) -> f64 {
+    const FRAME_REACH_PIXELS: f64 = 124.0;
+    const SIDE_ROOM_PER_BODY_WIDTH: f64 = 1.6;
+    const MIN_REACH_PIXELS: f64 = 60.0;
+    (FRAME_REACH_PIXELS - SIDE_ROOM_PER_BODY_WIDTH * koi_anatomy.body_width_pixels)
+        .max(MIN_REACH_PIXELS)
+}
+
+/// Adaptive pond: a closed, clockwise superellipse course measured by distance along it.
+/// It starts at the right-hand side, so a quarter turn short of a full lap is the top,
+/// matching the original circle's angles.
+struct PondCourse {
+    points: Vec<[f64; 2]>,
+    /// Distance along the course to each point; the last entry closes the loop.
+    distances: Vec<f64>,
+    length: f64,
+}
+
+impl PondCourse {
+    fn new(reach_pixels: f64) -> Self {
+        const SAMPLE_COUNT: usize = 2048;
+        // 2 / exponent: an exponent of 4 gives a square with well-rounded corners.
+        const SHAPE_POWER: f64 = 0.5;
+        let points: Vec<[f64; 2]> = (0..SAMPLE_COUNT)
+            .map(|sample_index| {
+                let parameter = TAU * sample_index as f64 / SAMPLE_COUNT as f64;
+                let (sine, cosine) = parameter.sin_cos();
+                [
+                    reach_pixels * cosine.signum() * cosine.abs().powf(SHAPE_POWER),
+                    reach_pixels * sine.signum() * sine.abs().powf(SHAPE_POWER),
+                ]
+            })
+            .collect();
+        let mut distances = Vec::with_capacity(SAMPLE_COUNT + 1);
+        let mut travelled = 0.0;
+        distances.push(0.0);
+        for sample_index in 0..SAMPLE_COUNT {
+            let [from_x, from_y] = points[sample_index];
+            let [to_x, to_y] = points[(sample_index + 1) % SAMPLE_COUNT];
+            travelled += (to_x - from_x).hypot(to_y - from_y);
+            distances.push(travelled);
+        }
+        Self {
+            points,
+            distances,
+            length: travelled,
+        }
+    }
+
+    fn position_at(&self, distance: f64) -> [f64; 2] {
+        let distance = distance.rem_euclid(self.length);
+        let segment_index = self
+            .distances
+            .partition_point(|&point_distance| point_distance <= distance)
+            .saturating_sub(1)
+            .min(self.points.len() - 1);
+        let segment_start = self.distances[segment_index];
+        let segment_length = (self.distances[segment_index + 1] - segment_start).max(f64::EPSILON);
+        let fraction = (distance - segment_start) / segment_length;
+        let [from_x, from_y] = self.points[segment_index];
+        let [to_x, to_y] = self.points[(segment_index + 1) % self.points.len()];
+        [
+            from_x + (to_x - from_x) * fraction,
+            from_y + (to_y - from_y) * fraction,
+        ]
+    }
+}
+
+/// The original lap circle's radius, kept for reference: as wide as the frame allows, tighter for longer koi so the
 /// whole fish stays inside, and never so tight that the body covers more than its
 /// share of the circle.
+#[allow(dead_code)]
 fn calculate_lap_radius(body_length_pixels: f64) -> f64 {
     const FRAME_REACH_PIXELS: f64 = 116.0;
     const OUTER_REACH_FRACTION: f64 = 0.33;

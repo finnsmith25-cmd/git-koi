@@ -119,6 +119,30 @@ const DART_STYLE: LapStyle = LapStyle {
     scull_phase_radians: 0.0,
 };
 
+/// Adaptive pond: two steady laps in eight seconds, cruising strokes at a quicker beat.
+const BRISK_STYLE: LapStyle = LapStyle {
+    loop_frame_count: 120,
+    lap_count: 2.0,
+    stroke_frame_count: 40.0,
+    stroke_share: 0.45,
+    speed_lag_frames: 4.0,
+    glide_speed: 0.6,
+    stroke_speed_gain: 1.0,
+    wave_frame_count: 6.0,
+    glide_wave_strength: 0.3,
+    stroke_wave_gain: 1.1,
+    glide_tail_spread_radians: 0.05,
+    stroke_tail_spread_radians: 0.14,
+    side_fin_strokes: SideFinStrokes::Brake {
+        stroke_opening_radians: 0.08,
+        brake_opening_radians: 0.25,
+    },
+    inside_flare_radians: 0.11,
+    scull_swing_radians: 0.09,
+    scull_frame_count: 20.0,
+    scull_phase_radians: 0.6,
+};
+
 /// Where the koi swims in a frame.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Course {
@@ -194,6 +218,7 @@ pub fn frame_count(behavior: Behavior) -> u32 {
     match behavior {
         Behavior::Cruise => CRUISE_STYLE.loop_frame_count,
         Behavior::Dart => DART_STYLE.loop_frame_count,
+        Behavior::Brisk => BRISK_STYLE.loop_frame_count,
         Behavior::Rest | Behavior::SurfaceFeeding => REST_FRAME_COUNT,
         Behavior::DeepRest => DEEP_REST_FRAME_COUNT,
     }
@@ -277,6 +302,7 @@ fn calculate_drive(behavior: Behavior, loop_frame: u32) -> Drive {
     match behavior {
         Behavior::Cruise => CRUISE_STYLE.calculate_drive(loop_frame),
         Behavior::Dart => DART_STYLE.calculate_drive(loop_frame),
+        Behavior::Brisk => BRISK_STYLE.calculate_drive(loop_frame),
         Behavior::Rest => calculate_rest_drive(loop_frame, REST_DEPTH),
         Behavior::SurfaceFeeding => Drive {
             feeding_phase: Some(

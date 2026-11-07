@@ -13,14 +13,14 @@ use git_koi::history::AccountSnapshot;
 use git_koi::koi::derive_koi_development;
 use git_koi::motion::frame_count;
 use git_koi::output::{encode_gif, encode_png, encode_preview_html};
-use git_koi::render::{KoiFrame, render_koi, render_swim_frame};
+use git_koi::render::{KoiFrame, render_koi, render_pond_frame};
 
 const USAGE: &str = "Usage: git-koi collect LOGIN [--output FILE]
        git-koi render SNAPSHOT --output-dir DIR [--body BODY]
        git-koi --help | --version
 Collect LOGIN's public GitHub snapshot as JSON through `gh api`: public owned and
 contributed repositories, and daily contributions from the account's creation
-through yesterday (UTC), the last complete day.
+through today (UTC), including the day still in progress (adaptive pond).
 Writes to standard output, or replaces FILE only after collection succeeds.
 Requires an authenticated GitHub CLI; in GitHub Actions, set GH_TOKEN to github.token.
 Render a collected SNAPSHOT into DIR: koi.gif swims the behavior chosen for its
@@ -147,16 +147,19 @@ fn render_day(snapshot_path: &Path, koi_body: KoiBody) -> Result<RenderedDay, St
         .map_err(|development_error| development_error.to_string())?;
     let behavior = select_behavior(&koi_development);
     let swim_frames: Vec<KoiFrame> = (0..frame_count(behavior))
-        .map(|frame_index| render_swim_frame(&koi_development, koi_body, behavior, frame_index))
+        .map(|frame_index| render_pond_frame(&koi_development, koi_body, behavior, frame_index))
         .collect();
     let gif_bytes =
         encode_gif(&swim_frames).map_err(|encoding_error| encoding_error.to_string())?;
     let png_bytes = encode_png(&render_koi(&koi_development, koi_body))
         .map_err(|encoding_error| encoding_error.to_string())?;
     let caption = format!(
-        "{} for {}, {} body",
+        "{} for {} ({} today, {}-day streak, {} koi), {} body",
         describe_behavior(behavior),
         koi_development.observed_on,
+        koi_development.today_contributions,
+        koi_development.daily_streak_days,
+        koi_development.koi_count(),
         name_body(koi_body)
     );
     let preview_html = encode_preview_html(&caption);
@@ -192,6 +195,7 @@ fn describe_behavior(behavior: Behavior) -> &'static str {
         Behavior::SurfaceFeeding => "surface feeding",
         Behavior::Dart => "dart",
         Behavior::Cruise => "cruise",
+        Behavior::Brisk => "brisk",
     }
 }
 

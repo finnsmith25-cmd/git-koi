@@ -219,9 +219,9 @@ fn collect_contribution_history(
     created_on: NaiveDate,
     today: NaiveDate,
 ) -> Result<ContributionHistory, CollectionError> {
-    let last_complete_day = today
-        .pred_opt()
-        .expect("calendar windows stay within supported dates");
+    // Adaptive pond: observe through today, the UTC day still in progress, so the koi
+    // reacts to today's commits on each hourly run instead of waiting for midnight.
+    let last_complete_day = today;
     if created_on > last_complete_day {
         return Ok(ContributionHistory {
             observed_on: last_complete_day,

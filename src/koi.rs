@@ -12,7 +12,7 @@ use crate::history::{
 };
 
 /// Derived inputs for appearance; source observations remain in the account snapshot.
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct KoiDevelopment {
     /// The stable numeric GitHub account ID.
     pub identity_seed: u64,
@@ -28,10 +28,48 @@ pub struct KoiDevelopment {
     pub streaks: StreakDevelopment,
     /// Counts around the observation date that behavior selection reads.
     pub recent_activity: RecentActivity,
+    /// Adaptive pond: contributions on the observation date itself. The observation
+    /// date is today (UTC, still in progress), so this resets to zero each midnight.
+    pub today_contributions: u64,
+    /// Adaptive pond: consecutive active days ending on the observation date, or on
+    /// the day before when the observation date has no contributions yet, so a streak
+    /// is not lost in the morning before the day's first commit.
+    pub daily_streak_days: u32,
+}
+
+/// Contributions per day at which the adaptive koi reaches its full daily size.
+/// LeetHub writes about three commits per solved problem, so this is about eight problems.
+pub const DAILY_FULL_SIZE_CONTRIBUTIONS: u64 = 24;
+/// Each full week of a daily streak adds one koi, up to this many extra koi.
+pub const MAX_STREAK_KOI: u32 = 5;
+/// Days of a daily streak that earn one extra koi.
+pub const STREAK_KOI_DAYS: u32 = 7;
+
+impl KoiDevelopment {
+    /// The lifetime-contribution total whose original growth curve gives the same size
+    /// as today's adaptive daily growth. A day starts as the smallest koi and grows on a
+    /// log curve with each contribution, reaching the original adult size at
+    /// DAILY_FULL_SIZE_CONTRIBUTIONS.
+    pub fn daily_size_contributions(&self) -> u64 {
+        const DAILY_SCALE: f64 = 3.0;
+        let bounded_today = self.today_contributions.min(DAILY_FULL_SIZE_CONTRIBUTIONS) as f64;
+        let daily_fraction = (1.0 + bounded_today / DAILY_SCALE).log2()
+            / (1.0 + DAILY_FULL_SIZE_CONTRIBUTIONS as f64 / DAILY_SCALE).log2();
+        let target_growth = daily_fraction * calculate_growth_fraction(ADULT_CONTRIBUTIONS);
+        // Invert calculate_growth_fraction.
+        const CONTRIBUTION_SCALE: f64 = 50.0;
+        let full_log = (1.0 + MAX_GROWTH_CONTRIBUTIONS as f64 / CONTRIBUTION_SCALE).log2();
+        (CONTRIBUTION_SCALE * ((target_growth * full_log).exp2() - 1.0)).round() as u64
+    }
+
+    /// How many koi swim: one, plus one for each full week of the current daily streak.
+    pub fn koi_count(&self) -> u32 {
+        1 + (self.daily_streak_days / STREAK_KOI_DAYS).min(MAX_STREAK_KOI)
+    }
 }
 
 /// Recent activity as of the observation date, as counts rather than judgments.
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RecentActivity {
     /// Days in the run of contribution-free days that ends on the observation date;
     /// an account that has never contributed counts every observed day.
@@ -47,7 +85,7 @@ pub struct RecentActivity {
 }
 
 /// Weekly streaks: runs of consecutive Monday-Sunday weeks with at least one active day.
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StreakDevelopment {
     /// The earliest longest run, replaced only by a strictly longer run.
     pub longest: Vec<ContributionWeek>,
@@ -56,7 +94,7 @@ pub struct StreakDevelopment {
 }
 
 /// The most recent streak, still running or ended.
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RecentStreak {
     /// Still running through the observation week; carries its weeks, oldest first.
     Current(Vec<ContributionWeek>),
@@ -111,6 +149,11 @@ pub fn derive_koi_development(
         observed_on: contribution_summary.observed_on,
         streaks: calculate_streak_development(&contribution_summary),
         recent_activity: measure_recent_activity(&contribution_summary),
+        today_contributions: contribution_summary
+            .daily_counts
+            .get(&contribution_summary.observed_on)
+            .map_or(0, |&count| u64::from(count)),
+        daily_streak_days: measure_daily_streak(&contribution_summary),
     })
 }
 
@@ -220,6 +263,16 @@ fn measure_recent_activity(contribution_summary: &ContributionSummary) -> Recent
             .map(|(_, &contribution_count)| u64::from(contribution_count))
             .collect(),
     }
+}
+
+/// Consecutive active days ending on the observation date, or ending the day before
+/// when the observation date is still empty.
+fn measure_daily_streak(contribution_summary: &ContributionSummary) -> u32 {
+    let mut counts = contribution_summary.daily_counts.values().rev().peekable();
+    if counts.peek() == Some(&&0) {
+        counts.next();
+    }
+    counts.take_while(|&&count| count > 0).count() as u32
 }
 
 fn calculate_streak_development(contribution_summary: &ContributionSummary) -> StreakDevelopment {

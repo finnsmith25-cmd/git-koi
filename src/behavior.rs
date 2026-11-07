@@ -15,7 +15,14 @@ pub enum Behavior {
     Dart,
     /// One slow lap; the everyday swim.
     Cruise,
+    /// Adaptive pond: two steady laps, between cruising and darting.
+    Brisk,
 }
+
+/// Adaptive pond: today's contributions at which the koi starts swimming briskly.
+pub const BRISK_CONTRIBUTIONS: u64 = 6;
+/// Adaptive pond: today's contributions at which the koi starts darting.
+pub const DART_CONTRIBUTIONS: u64 = 12;
 
 const DEEP_REST_QUIET_DAYS: u32 = 60;
 const REST_QUIET_DAYS: u32 = 14;
@@ -48,6 +55,39 @@ const DAYS_PER_WEEK: usize = 7;
 /// and the koi darts at most one day a week beyond milestones. This reads no clock
 /// and changes no growth, colors, or marks.
 pub fn select_behavior(koi_development: &KoiDevelopment) -> Behavior {
+    select_adaptive_behavior(koi_development)
+}
+
+/// Adaptive pond: the movement follows today's contributions so far (UTC). Each day
+/// starts docile and gets livelier with every commit:
+///
+/// | Behavior | When |
+/// | --- | --- |
+/// | Deep rest | no contributions today and DEEP_REST_QUIET_DAYS or more quiet days |
+/// | Rest | no contributions today yet: slow, low and docile |
+/// | Cruise | 1 to BRISK_CONTRIBUTIONS - 1 today: one slow lap of the pond |
+/// | Brisk | BRISK_CONTRIBUTIONS to DART_CONTRIBUTIONS - 1 today: two steady laps |
+/// | Dart | DART_CONTRIBUTIONS or more today: two fast laps of bursts and glides |
+pub fn select_adaptive_behavior(koi_development: &KoiDevelopment) -> Behavior {
+    let today = koi_development.today_contributions;
+    if today == 0 {
+        if koi_development.recent_activity.quiet_day_count >= DEEP_REST_QUIET_DAYS {
+            Behavior::DeepRest
+        } else {
+            Behavior::Rest
+        }
+    } else if today < BRISK_CONTRIBUTIONS {
+        Behavior::Cruise
+    } else if today < DART_CONTRIBUTIONS {
+        Behavior::Brisk
+    } else {
+        Behavior::Dart
+    }
+}
+
+/// The original git-koi rules, kept for reference: the day that just ended chooses the
+/// movement, first matching rule wins.
+pub fn select_original_behavior(koi_development: &KoiDevelopment) -> Behavior {
     let recent_activity = &koi_development.recent_activity;
     if recent_activity.quiet_day_count >= DEEP_REST_QUIET_DAYS {
         Behavior::DeepRest
